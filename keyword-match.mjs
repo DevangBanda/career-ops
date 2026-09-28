@@ -19,10 +19,9 @@
  */
 
 import { readFileSync, existsSync, statSync  } from 'fs';
-import { join, dirname, isAbsolute, basename } from 'path';
-import { fileURLToPath, pathToFileURL } from 'url';
-
-const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
+import { join, isAbsolute, basename } from 'path';
+import { isMainModule } from './lib/is-main-module.mjs';
+import { getCareerOpsRoot } from './path-resolver.mjs';
 
 /**
  * Small, deliberately conservative map of interchangeable ATS surface forms.
@@ -294,7 +293,7 @@ function runSelfTest() {
 }
 
 // --- CLI (guarded so importing this module never runs it) ---
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isMainModule(import.meta.url)) {
   const args = process.argv.slice(2);
 
   if (args.includes('--self-test')) {
@@ -362,7 +361,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 
     const cvPath = cvArg
       ? (isAbsolute(cvArg) ? cvArg : join(process.cwd(), cvArg))
-      : join(CAREER_OPS, 'cv.md');
+      : join(getCareerOpsRoot(), 'cv.md');
 
     if (!existsSync(cvPath) || !statSync(cvPath).isFile()) {
       console.error(`CV not found: ${cvPath}. Pass --cv <path> to point at your CV.`);

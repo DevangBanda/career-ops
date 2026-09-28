@@ -15378,8 +15378,26 @@ try {
     fail(`keyword coverage: CLI no-arg handling wrong: status=${noArg.status} stderr=${JSON.stringify(noArg.stderr)}`);
   }
 
+  // A mistyped flag or a stray second path must fail fast instead of silently
+  // producing Markdown when JSON was asked for (both rejected before any file I/O).
+  const unknownOpt = runCli(['--jsno']);
+  if (unknownOpt.status === 1 && /Unknown option: --jsno/.test(unknownOpt.stderr) && noStack(unknownOpt.stderr)) {
+    pass('keyword coverage: CLI rejects an unknown option with exit 1');
+  } else {
+    fail(`keyword coverage: CLI unknown-option handling wrong: status=${unknownOpt.status} stderr=${JSON.stringify(unknownOpt.stderr)}`);
+  }
+
+  const extraArg = runCli(['first-report.md', 'second-report.md']);
+  if (extraArg.status === 1 && /Unexpected argument: second-report\.md/.test(extraArg.stderr) && noStack(extraArg.stderr)) {
+    pass('keyword coverage: CLI rejects an extra positional argument with exit 1');
+  } else {
+    fail(`keyword coverage: CLI extra-argument handling wrong: status=${extraArg.status} stderr=${JSON.stringify(extraArg.stderr)}`);
+  }
+
 } catch (e) {
   fail(`keyword coverage tests crashed: ${e.message}`);
+}
+
 // ── Plugin engine (contract + sandbox + firewall) ────────────────
 console.log('\n49. Plugin engine (contract + sandbox + firewall)');
 

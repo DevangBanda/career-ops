@@ -320,8 +320,16 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         cvArg = next;
         i++;
       } 
-      else if (!a.startsWith('--') && reportArg === null) {
+      else if (a.startsWith('--')) {
+        console.error(`Unknown option: ${a}`);
+        process.exit(1);
+      }
+      else if (reportArg === null) {
         reportArg = a;
+      }
+      else {
+        console.error(`Unexpected argument: ${a}`);
+        process.exit(1);
       }
     }
 

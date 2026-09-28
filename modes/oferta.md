@@ -740,7 +740,7 @@ Not every JD source is a scannable ATS API or even a URL — some only ever exis
 
 ### 1b. Embed ATS keyword coverage
 
-After saving the report, run the coverage check and paste its `## Keyword Coverage` block into the report, directly below `## Keywords extracted`:
+After saving the report, run the coverage check and paste its `## Keyword Coverage` block into the report, directly below the `## Keywords extracted` section (after its keyword list, before `## Job Description (archived verbatim)`):
 
 ```bash
 node keyword-match.mjs reports/{###}-{company-slug}-{YYYY-MM-DD}.md

@@ -24,11 +24,13 @@
  * all reuse it with no prod-vs-test drift.
  */
 
-import { existsSync, readdirSync, readFileSync } from 'fs';
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'fs';
 import path from 'path';
 import { pathToFileURL } from 'url';
 import { resolveAndValidate } from './_net.mjs';
+import { normalizeUrl } from '../url-key.mjs';
 import { readLock, writeLockEntry, diffPlugin, hashPluginTree, consentSurface } from './_lock.mjs';
+import { loadRegistry } from './_registry.mjs';
 
 /** The complete, closed set of hook kinds. Anything else (apply/submit/…) is rejected. */
 export const HOOK_KINDS = ['provider', 'ingest', 'search', 'notify', 'export'];
@@ -61,6 +63,35 @@ function warnSkip(label, reason) {
   console.warn(`⚠️  ${label}: skipping — ${reason}`);
 }
 
+function isWithinDirectory(rootAbs, candidateAbs) {
+  const rel = path.relative(rootAbs, candidateAbs);
+  return rel === '' || (!rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel));
+}
+
+function nearestExistingPath(absPath) {
+  let current = path.resolve(absPath);
+  while (!existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+  return current;
+}
+
+function isSafePluginPath(rootAbs, candidateAbs) {
+  const rootResolved = path.resolve(rootAbs);
+  const candidateResolved = path.resolve(candidateAbs);
+  if (!isWithinDirectory(rootResolved, candidateResolved)) return false;
+
+  const nearestExisting = nearestExistingPath(candidateResolved);
+  if (!nearestExisting) return false;
+  try {
+    return isWithinDirectory(realpathSync(rootResolved), realpathSync(nearestExisting));
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Resolve the config/plugins.yml path for a given project root.
  * @param {string} root
@@ -80,8 +111,13 @@ export async function loadPluginConfig(root) {
   const file = pluginsConfigPath(root);
   if (!existsSync(file)) return {};
   try {
-    const yaml = (await import('js-yaml')).default;
-    const parsed = yaml.load(readFileSync(file, 'utf8'));
+    // Named, not `.default`: js-yaml 5 ships a native ESM build with no default
+    // export, so `.default` is undefined there and `yaml.load` throws straight
+    // into the catch below. That catch fails OPEN — it returns {}, so every
+    // configured plugin silently stops loading and the only trace is one ⚠️ line
+    // that reads like a malformed config. The named form resolves on 4.x and 5.x.
+    const { load } = await import('js-yaml');
+    const parsed = load(readFileSync(file, 'utf8'));
     return parsed && typeof parsed === 'object' ? parsed : {};
   } catch (err) {
     warnSkip('config/plugins.yml', `unreadable, ignoring — ${err.message}`);
@@ -155,7 +191,7 @@ export function validateManifest(m, dir, dirName) {
   const entry = typeof m.entry === 'string' && m.entry.trim() ? m.entry : 'index.mjs';
   if (!entry.endsWith('.mjs')) { warnSkip(label, `entry "${entry}" must be a .mjs file`); return null; }
   const entryAbs = path.resolve(dir, entry);
-  if (entryAbs !== dir && !entryAbs.startsWith(dir + path.sep)) { warnSkip(label, `entry "${entry}" escapes the plugin directory`); return null; }
+  if (!isSafePluginPath(dir, entryAbs)) { warnSkip(label, `entry "${entry}" escapes the plugin directory`); return null; }
 
   // Optional companion skill (Open-Agent-Skill-Standard SKILL.md). Traversal-
   // guarded like entry. Surfaced on-demand via `plugins.mjs skill <id>`; never
@@ -164,10 +200,11 @@ export function validateManifest(m, dir, dirName) {
   if (m.skill !== undefined) {
     if (typeof m.skill !== 'string' || !m.skill.endsWith('.md')) { warnSkip(label, 'skill must be a relative .md path'); return null; }
     const skillAbs = path.resolve(dir, m.skill);
-    if (skillAbs !== dir && !skillAbs.startsWith(dir + path.sep)) { warnSkip(label, `skill "${m.skill}" escapes the plugin directory`); return null; }
+    if (!isSafePluginPath(dir, skillAbs)) { warnSkip(label, `skill "${m.skill}" escapes the plugin directory`); return null; }
     if (!existsSync(skillAbs)) { warnSkip(label, `skill file not found: ${m.skill}`); return null; }
     skill = m.skill;
   }
+
 
   return {
     id: m.id,
@@ -194,10 +231,20 @@ export function validateManifest(m, dir, dirName) {
  * plugins.local/). existsSync-guarded (never mkdir — a fresh, plugin-free
  * install stays filesystem-inert). Alphabetical within a root for determinism.
  *
- * @param {string[]} roots   Absolute directories to scan (e.g. [plugins/, plugins.local/]).
+ * `overrideIds` is the ONE controlled exception to first-root-wins: an id in
+ * this set lets a LATER root (plugins.local/) override an earlier one
+ * (bundled plugins/). It is computed ONLY by resolveSuccessorIds() — i.e. a
+ * community plugin the maintainer registered as the bundled plugin's
+ * `supersedesBundled` successor AND that the user installed at its exact
+ * pinned sha. A plain, unverified plugins.local/<id> is never in the set, so
+ * it can NEVER shadow a reviewed bundled plugin (the no-downgrade invariant).
+ * Default empty → identical to the original bundled-always-wins behavior.
+ *
+ * @param {string[]} roots          Absolute directories to scan (e.g. [plugins/, plugins.local/]).
+ * @param {Set<string>} [overrideIds]  ids whose later-root copy may override an earlier-root one.
  * @returns {PluginManifestNormalized[]}
  */
-export function discoverPlugins(roots) {
+export function discoverPlugins(roots, overrideIds = new Set()) {
   const found = new Map();
   for (const root of roots) {
     if (!existsSync(root)) continue;
@@ -208,8 +255,24 @@ export function discoverPlugins(roots) {
       warnSkip(root, `unreadable — ${err.message}`);
       continue;
     }
+    // A symlink to a plugin repo is a directory for our purposes: plugins.local/
+    // exists so a developer can work on a plugin from its own checkout, and
+    // linking it in is the natural way to do that. Dirent.isDirectory() is false
+    // for a symlink, so those were silently skipped -- no warning, the plugin
+    // simply never appeared in `plugins.mjs list`. statSync resolves the link;
+    // a broken one throws and is treated as not-a-directory rather than crashing
+    // discovery for every other plugin.
+    const isDirLike = (e) => {
+      if (e.isDirectory()) return true;
+      if (!e.isSymbolicLink()) return false;
+      try {
+        return statSync(path.join(root, e.name)).isDirectory();
+      } catch {
+        return false;
+      }
+    };
     const dirs = entries
-      .filter(e => e.isDirectory() && !e.name.startsWith('_') && !e.name.startsWith('.'))
+      .filter(e => isDirLike(e) && !e.name.startsWith('_') && !e.name.startsWith('.'))
       .map(e => e.name)
       .sort();
     for (const name of dirs) {
@@ -225,11 +288,46 @@ export function discoverPlugins(roots) {
       }
       const manifest = validateManifest(parsed, dir, name);
       if (!manifest) continue;
-      if (found.has(manifest.id)) continue; // earlier root wins (bundled > local)
+      if (found.has(manifest.id)) {
+        // earlier root wins (bundled > local) — EXCEPT an approved successor.
+        if (overrideIds.has(manifest.id)) found.set(manifest.id, manifest);
+        continue;
+      }
       found.set(manifest.id, manifest);
     }
   }
   return [...found.values()];
+}
+
+/**
+ * Compute the set of bundled ids that an APPROVED community successor should
+ * override. A successor qualifies only when ALL hold:
+ *   (a) a registry entry declares `supersedesBundled: true` for that id
+ *       (registry = SYSTEM file → a maintainer reviewed + merged it), AND
+ *   (b) plugins.local/<id> is actually installed, AND
+ *   (c) the installed sha === the registry's pinned sha (the user has the
+ *       exact reviewed commit — the same bar classifySource() calls 'approved').
+ * Anything short of (c) — off-registry drift, unverified, not installed —
+ * leaves the bundled reference in charge. This is the trust hinge of the whole
+ * seed/successor model: only a reviewed, pinned, installed successor wins.
+ * @param {string} root
+ * @returns {Set<string>}
+ */
+export function resolveSuccessorIds(root) {
+  const ids = new Set();
+  try {
+    const reg = loadRegistry(root);
+    const lock = readLock(root);
+    for (const e of reg.plugins) {
+      if (e.supersedesBundled !== true || typeof e.id !== 'string') continue;
+      const localManifest = path.join(root, 'plugins.local', e.id, 'manifest.json');
+      const installedSha = lock?.plugins?.[e.id]?.sha;
+      if (existsSync(localManifest) && installedSha && installedSha === e.sha) ids.add(e.id);
+    }
+  } catch {
+    // Any registry/lock read problem → no overrides (bundled references stay in charge).
+  }
+  return ids;
 }
 
 /**
@@ -380,6 +478,11 @@ export function buildCtx(manifest, opts = {}) {
     settings: Object.freeze({ ...(opts.settings || {}) }),
     log,
     dryRun: opts.dryRun === true,
+    // The canonical posting-URL key, so a plugin can deduplicate the postings it
+    // returns the way the tracker and scanner do. Reaching it through ctx keeps
+    // plugin and core callers equivalent without a repository-relative import or
+    // a copied body, which is the whole point of the capability (#4218).
+    normalizePostingUrl: normalizeUrl,
   });
 }
 
@@ -497,9 +600,10 @@ export function lockGate(manifest, root) {
   }
 }
 
-export async function loadPlugins(kind, { root, dryRun = false }) {
+export async function loadPlugins(kind, { root, dryRun = false, pluginId = null }) {
   const cfg = await loadPluginConfig(root);
-  const manifests = discoverPlugins(pluginRoots(root)).filter(m => m.hooks.includes(kind));
+  let manifests = discoverPlugins(pluginRoots(root), resolveSuccessorIds(root)).filter(m => m.hooks.includes(kind));
+  if (pluginId) manifests = manifests.filter(m => m.id === pluginId);
   const out = [];
   for (const manifest of manifests) {
     if (!pluginStatus(manifest, cfg).enabled) continue;
@@ -534,12 +638,12 @@ export async function loadDotenvOnce() {
  *
  * @param {string} kind
  * @param {*} payload   For provider this is unused; for ingest none; search a query; export a snapshot; notify a payload.
- * @param {{ root: string, dryRun?: boolean, timeoutMs?: number }} opts
+ * @param {{ root: string, dryRun?: boolean, timeoutMs?: number, pluginId?: string }} opts
  * @returns {Promise<Array<{ id: string, ok: boolean, result?: any, error?: string }>>}
  */
-export async function runHook(kind, payload, { root, dryRun = false, timeoutMs = DEFAULT_HOOK_TIMEOUT_MS }) {
+export async function runHook(kind, payload, { root, dryRun = false, timeoutMs = DEFAULT_HOOK_TIMEOUT_MS, pluginId = null }) {
   await loadDotenvOnce();
-  const loaded = await loadPlugins(kind, { root, dryRun });
+  const loaded = await loadPlugins(kind, { root, dryRun, pluginId });
   const results = [];
   for (const { id, hook, ctx } of loaded) {
     const invoke = kind === 'search'
@@ -560,6 +664,10 @@ export async function runHook(kind, payload, { root, dryRun = false, timeoutMs =
     }
   }
   return results;
+}
+
+export function filterResultsForId(results, id) {
+  return results.filter(r => r.id === id);
 }
 
 /**
@@ -602,7 +710,7 @@ export async function mergeProviderPlugins(providersMap, { root }) {
   // untouched — fail-open is enforced structurally here, not just emergently.
   try {
     const cfg = await loadPluginConfig(root);
-    const providerManifests = discoverPlugins(pluginRoots(root)).filter(m => m.hooks.includes('provider'));
+    const providerManifests = discoverPlugins(pluginRoots(root), resolveSuccessorIds(root)).filter(m => m.hooks.includes('provider'));
     if (providerManifests.length === 0) return;
 
     // Only the plugins the user actually switched on in plugins.yml matter.

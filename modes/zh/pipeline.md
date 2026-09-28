@@ -6,7 +6,7 @@
 
 1. **读取数据**：分析 `data/pipeline.md` 文件，找出 "Pending" 模块下所有标记为 `- [ ]` 的待处理项目。
 2. **循环遍历处理**：对每一个未处理的 URL：
-   a. **计算新报告编号**：扫描 `reports/` 目录，找出当前最大的三位数字前缀并加 1，作为 `REPORT_NUM`。
+   a. **领取新报告编号**：运行 `node reserve-report-num.mjs` 原子地占用下一个顺序编号作为 `REPORT_NUM`；报告写入后运行 `node reserve-report-num.mjs --release <num>` 释放占位。切勿自己扫描 `reports/` 取最大值加 1 —— 并发时多个 worker 会算出同一个编号（#749）。
    b. **抓取职位描述 (JD)**：首选 Playwright (通过 `browser_navigate` + `browser_snapshot`) 渲染网页抓取，备选 `WebFetch` 提取静态文本，最后使用 `WebSearch` 搜索同名岗位快照。
    c. **异常处理**：若链接因权限、失效等原因完全无法打开，将该项标记为 `- [!]`，附加错误描述，并继续处理下一个。
    d. **执行一键管道评估**：运行 A-F 维度评估 → 保存为报告 `.md` 文件 → 根据设定生成简历 PDF（若评分达到阈值）→ 自动记录至 tracker。
@@ -45,6 +45,7 @@
 ## 智能解析 URL 职位描述
 
 1. **Playwright (首选)**：`browser_navigate` + `browser_snapshot`。能够稳定处理所有单页面应用 (SPA)。
+   - **可选 — CLI 提取器（`config/profile.yml` 中的 `scan.extractor: cli`）：** 改为运行 `node browser-extract.mjs <url>`（`--mode jd`）——紧凑的 `{ "url", "title", "text" }`，更少 token（因门户而异）。出错或缺失时**静默**回退到 `browser_navigate` + `browser_snapshot`。
 2. **WebFetch (备选)**：适用于静态页面，或在 Playwright 环境不可用时作为后备。
 3. **WebSearch (最终手段)**：在第三方招聘聚合平台上查找同名职位的快照。
 

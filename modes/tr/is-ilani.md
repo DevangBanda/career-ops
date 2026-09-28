@@ -140,6 +140,9 @@ Değerlendirmenin tamamını `reports/{###}-{sirket-slug}-{YYYY-MM-DD}.md` olara
 ## G) İlan Meşruiyeti
 (Blok G'nin tam içeriği)
 
+## Risk Summary
+(her risk sinyali için bir satır, sabit sıra — yukarıdaki Risk Summary bölümüne bakın)
+
 ## H) Başvuru Formu Taslak Yanıtları
 (yalnızca puan >= 4,5 ise — form alanları için taslak yanıtlar)
 
@@ -151,17 +154,21 @@ Değerlendirmenin tamamını `reports/{###}-{sirket-slug}-{YYYY-MM-DD}.md` olara
 
 ### 2. Takipçiye Kaydet
 
-**Yeni** kayıt için `data/applications.md`'yi doğrudan düzenleme. Bunun yerine `batch/tracker-additions/{num}-{sirket-slug}.tsv` dosyasına tek satır TSV yaz (8 veya 9 sekme ile ayrılmış sütun):
+**Yeni** kayıt için `data/applications.md`'yi doğrudan düzenleme. Bunun yerine `batch/tracker-additions/{num}-{sirket-slug}.tsv` dosyasına sekmeyle ayrılmış **iki** satır yaz: önce **sütun adları** satırı, hemen altına tam olarak bir veri satırı.
 
 ```tsv
-{num}\t{date}\t{company}\t{role}\t{status}\t{score}\t{pdf_emoji}\t[{num}](reports/{num}-{slug}-{date}.md)\t{note}
+num\tdate\tcompany\trole\tstatus\tscore\tpdf\treport\tnotes\turl
+{num}\t{date}\t{company}\t{role}\t{status}\t{score}\t{pdf_emoji}\t[{num}](reports/{num}-{slug}-{date}.md)\t{note}\t{url}
 ```
+
+Her iki satırı da **tam olarak yukarıdaki gibi** yaz: sütun adları İngilizce, değerler ise **üstlerindeki adlarla aynı sırada**. `merge-tracker.mjs` alanları ADA göre çözer; tam da bu yüzden adların altlarındaki satırı tarif etmesi gerekir — satırlardan yalnızca birini yeniden sıralarsan `company` ile `role` sessizce yer değiştirir (ikisi de serbest metin olduğu için içerik kontrolü bunu yakalayamaz).
 
 - `{num}` = sıradaki numara (tam sayı, `reports/` klasöründen hesapla)
 - `{status}` = `Evaluated`
 - `{score}` = `X.X/5` formatı (örn. `4.2/5`)
 - `{pdf_emoji}` = `✅` veya `❌`
-- `{note}` = kısa not (isteğe bağlı, sütun atlanabilir)
+- `{note}` = kısa not (hücre boş bırakılabilir)
+- `{url}` = ilanın URL'si. Bu **belirleyici yinelenen-kayıt anahtarıdır**: `merge-tracker.mjs` satırları önce buna göre eşler, yalnızca URL yoksa şirket+rol bulanık eşleşmesine düşer. URL yoksa hücreyi **boş** bırak — asla `N/A` veya `-` yazma; bu yer tutucular atılır ve satır anahtarsız kalır.
 
 Ardından `node merge-tracker.mjs` çalıştır.
 
@@ -231,6 +238,38 @@ Ardından `node merge-tracker.mjs` çalıştır.
 - **Recruiter kaynağı (kamuya açık ilan yok):** Tazelik sinyali alınamaz. Aktif recruiter temasının kendisinin olumlu bir meşruiyet sinyali olduğunu not et.
 
 ---
+
+## Risk Summary (Blok G'den sonra)
+
+Rapor gövdesini Blok G'nin hemen ardından, Blok H'den önce bir `## Risk Summary` bloğuyla kapatın — her risk sinyali için bir satır, sabit sıra. Böylece adayın gerçekten sorduğu soru ("bu şirkete katılmak güvenli mi?") Blok A, Blok G ve harici bir dosyayı zihinde birleştirmek yerine tek ekranda yanıtlanır.
+
+**Yalnızca toplama, sıfır yeni yargı.** Her satır, kaynak sinyalin zaten ürettiği kararı alıntılar veya ona bağlanır. Özet asla yeniden puanlamaz, yeniden ağırlıklandırmaz veya kararı geçersiz kılmaz — bir satır yanlış görünüyorsa düzeltme buraya değil, kaynak sinyale aittir.
+
+Satır başına üç durum: `✅ {net karar}` / `⚠️ {bulgu}` / `— not evaluated`. **`— not evaluated` birinci sınıf bir durumdur:** bir sinyal çalıştırılamadıysa satırı atlamak yerine bunu açıkça belirtin; ancak o zaman tamamı ✅ olan bir özete güvenilebilir. **Adlandırılmış istisna:** Mülakat kırmızı bayrakları satırı, değerlendirilmemiş durumunu `— no interview sessions yet` olarak yazar — aynı "değerlendirilmedi" kavramının o satıra özgü, daha belirgin ifadesi (çapraz kontrol çalıştı, yalnızca redflags dosyası bulunamadı); dördüncü bir durum değildir.
+
+Satır etiketleri, `| Signal | Status |` başlıkları ve durum sözcükleri sabit literaldir, çevrilmez: Machine Summary'deki `risk_summary` alanı bunlara dayanır.
+
+| Sinyal | Kaynak | Satırın yazımı |
+|--------|--------|----------------|
+| Posting legitimacy | Blok G değerlendirme kademesi | `✅ High Confidence`; Proceed with Caution / Suspicious için `⚠️ {tier} — {tek cümlelik gerekçe}` |
+| Employment classification | Blok G içindeki çalışma biçimi sinyali | Kontrol çalıştı ve bir şey bulunmadıysa `✅ clear`; bayrak tetiklendiyse `⚠️ contractor-style language: "{alıntı ifade}"`; kontrol çalışamadıysa `— not evaluated` |
+| Culture screen | Blok A'daki kültür taraması alanı | `✅ pass` veya `⚠️ caution — {kanıt}` / `⚠️ fail — {kanıt}`; tarama yapılmadıysa `— not evaluated` |
+| Interview red flags | `interview-prep/{company-slug}-redflags.md` (`interview-redflag` modundan) | **Kopya değil, çapraz referans:** dosya varsa mevcut uyarı düzeyini ve göreli bağlantısını yazın — `[{level}](../interview-prep/{company-slug}-redflags.md)` (`reports/` klasörüne göre); yoksa `— no interview sessions yet` |
+| AI claims vs. infrastructure | Blok G'deki AI/altyapı tutarlılık kontrolü (varsa) | Bu rapor kontrolü içeriyorsa kararını yansıtın (`✅ consistent` / `⚠️ {bulgu}`); aksi halde `— not evaluated`. Kontrol var olduğunda satır kendiliğinden etkinleşir, sıralama bağımlılığı yoktur |
+
+Blok biçimi:
+
+```markdown
+## Risk Summary
+
+| Signal | Status |
+|--------|--------|
+| Posting legitimacy | ✅ High Confidence |
+| Employment classification | ⚠️ contractor-style language: "{quoted phrase}" |
+| Culture screen | ⚠️ caution — {evidence} |
+| Interview red flags | — no interview sessions yet |
+| AI claims vs. infrastructure | — not evaluated |
+```
 
 ## Puanlama (1-5 global)
 
